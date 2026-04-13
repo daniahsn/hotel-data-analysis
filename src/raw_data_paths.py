@@ -60,12 +60,15 @@ def _find_in_raw_dir(raw: Path, names: tuple[str, ...]) -> Path | None:
     return None
 
 
-def discover_raw_paths() -> dict[str, Path]:
-    """Return paths for hotels, world cities, and crime CSVs."""
+def discover_raw_paths(
+    keys: tuple[str, ...] | None = None,
+) -> dict[str, Path]:
+    """Return paths for requested datasets (default: hotels, world cities, crime)."""
+    order = keys if keys is not None else DATASET_ORDER
     if is_kaggle_runtime():
         out: dict[str, Path] = {}
         missing: list[str] = []
-        for key in DATASET_ORDER:
+        for key in order:
             p = _find_csv_under(KAGGLE_INPUT, SEARCH_NAMES[key])
             if p is None:
                 missing.append(key)
@@ -82,7 +85,7 @@ def discover_raw_paths() -> dict[str, Path]:
     raw = PROJECT_ROOT / "data" / "raw"
     out = {}
     missing: list[str] = []
-    for key in DATASET_ORDER:
+    for key in order:
         p = _find_in_raw_dir(raw, LOCAL_NAMES[key])
         if p is None:
             missing.append(f"{key} (tried {', '.join(LOCAL_NAMES[key])} under {raw})")
