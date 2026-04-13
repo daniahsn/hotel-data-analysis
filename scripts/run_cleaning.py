@@ -23,6 +23,20 @@ def main() -> None:
         help="Directory for Parquet/CSV outputs",
     )
     p.add_argument(
+        "--chunksize",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Read hotels CSV in chunks of N rows (prints progress; good for Kaggle long runs)",
+    )
+    p.add_argument(
+        "--progress-every",
+        type=int,
+        default=None,
+        metavar="N",
+        help="When using --chunksize, print a heartbeat every N processed hotel rows",
+    )
+    p.add_argument(
         "--sample",
         type=int,
         default=None,
@@ -47,6 +61,8 @@ def main() -> None:
     written = run_cleaning_pipeline(
         output_dir=args.output_dir,
         hotels_sample_rows=args.sample,
+        hotels_chunksize=args.chunksize,
+        progress_every_rows=args.progress_every,
         also_join=not args.no_join,
         output_format=args.format,
         hotels_encoding=args.hotels_encoding,

@@ -11,6 +11,7 @@ import logging
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -465,6 +466,8 @@ def run_cleaning_pipeline(
     world_path: Path | None = None,
     output_dir: Path,
     hotels_sample_rows: int | None = None,
+    hotels_chunksize: int | None = None,
+    progress_every_rows: int | None = None,
     also_join: bool = True,
     output_format: Literal["parquet", "csv"] = "parquet",
     hotels_encoding: str | None = None,
@@ -477,11 +480,47 @@ def run_cleaning_pipeline(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    hotels_raw = read_hotels_csv(hp, nrows=hotels_sample_rows, encoding=hotels_encoding)
     world_raw = read_world_cities_csv(wp, encoding=world_encoding)
-
-    hotels_c = clean_hotels(hotels_raw)
     world_c = clean_world_cities(world_raw)
+    if hotels_chunksize is not None and hotels_sample_rows is not None:
+        raise ValueError("Use either hotels_chunksize or hotels_sample_rows (not both).")
+
+    if hotels_chunksize is None:
+        hotels_raw = read_hotels_csv(hp, nrows=hotels_sample_rows, encoding=hotels_encoding)
+        hotels_c = clean_hotels(hotels_raw)
+    else:
+        # Chunked mode: keep notebook output moving (Kaggle sessions disconnect less often).
+        read_kw: dict[str, Any] = {
+            "low_memory": False,
+            "skipinitialspace": True,
+            "usecols": _hotel_csv_usecols_keep,
+            "chunksize": hotels_chunksize,
+        }
+        frames: list[pd.DataFrame] = []
+        total = 0
+
+        def _iter_chunks(enc: str) -> Iterator[pd.DataFrame]:
+            yield from pd.read_csv(hp, encoding=enc, **read_kw)
+
+        encs = (hotels_encoding,) if hotels_encoding is not None else ("utf-8-sig", "latin-1")
+        last_err: Exception | None = None
+        for enc in encs:
+            try:
+                for chunk in _iter_chunks(enc):
+                    total += len(chunk)
+                    frames.append(clean_hotels(chunk))
+                    if progress_every_rows and (total % progress_every_rows) < hotels_chunksize:
+                        print(f"[{datetime.now().isoformat(timespec='seconds')}] cleaned {total:,} hotel rows")
+                last_err = None
+                break
+            except UnicodeDecodeError as e:
+                last_err = e
+                frames.clear()
+                total = 0
+                continue
+        if last_err is not None:
+            raise last_err
+        hotels_c = pd.concat(frames, ignore_index=True) if frames else clean_hotels(pd.DataFrame())
 
     written: dict[str, Path] = {}
 
