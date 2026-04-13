@@ -7,7 +7,10 @@ Functions are grouped by step; each step is a small, named unit you can call or 
 from __future__ import annotations
 
 import functools
+import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -40,13 +43,33 @@ def _as_clean_iso2_list(values: pd.Series) -> list[str]:
     return out
 
 
+@contextmanager
+def _silence_country_converter_warnings() -> Iterator[None]:
+    """``country_converter`` logs ``X not found in name_short`` once per miss; silence during batch."""
+    loggers = (
+        logging.getLogger("country_converter.country_converter"),
+        logging.getLogger("country_converter"),
+    )
+    previous = [(lg, lg.level, lg.propagate) for lg in loggers]
+    try:
+        for lg in loggers:
+            lg.setLevel(logging.CRITICAL)
+            lg.propagate = False
+        yield
+    finally:
+        for lg, level, prop in previous:
+            lg.setLevel(level)
+            lg.propagate = prop
+
+
 def _batch_country_convert(names: list[str], *, src: str, to: str = "ISO2") -> list[Any]:
     cc = _country_converter()
     kwargs: dict[str, Any] = {"src": src, "to": to}
-    try:
-        return cc.convert(names, **kwargs, not_found=None)  # type: ignore[call-arg]
-    except TypeError:
-        return cc.convert(names, **kwargs)
+    with _silence_country_converter_warnings():
+        try:
+            return cc.convert(names, **kwargs, not_found=None)  # type: ignore[call-arg]
+        except TypeError:
+            return cc.convert(names, **kwargs)
 
 
 def _iso2_series_from_batch(original: pd.Series, raw: list[Any] | Any) -> pd.Series:
@@ -80,8 +103,20 @@ def iso2_from_country_names(names: pd.Series) -> pd.Series:
 
 
 def iso2_for_hotels(county_code: pd.Series, county_name: pd.Series) -> pd.Series:
-    """Prefer ``countyCode``; fill gaps from ``countyName``."""
-    return iso2_from_codes(county_code).fillna(iso2_from_country_names(county_name))
+    """
+    Prefer ``countyCode``; fill gaps from ``countyName`` only where the code is missing.
+
+    The hotels ``countyName`` field often holds city/region text (e.g. ``ANTIGUA``), not
+    ISO country names. Running name matching on every row floods logs with ``not found``.
+    """
+    from_codes = iso2_from_codes(county_code)
+    need_name = from_codes.isna()
+    if not need_name.any():
+        return from_codes
+    from_names = iso2_from_country_names(county_name.loc[need_name])
+    out = from_codes.copy()
+    out.loc[need_name] = from_names.to_numpy()
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +216,7 @@ def attractions_count(series: pd.Series) -> pd.Series:
 # Full-table helpers
 # ---------------------------------------------------------------------------
 
-# Kaggle / vendor CSVs often differ by case, spaces, or spelling vs our first sample.
+# Kaggle / local CSVs often differ by case, spaces, or spelling vs our first sample.
 _CANONICAL_HOTEL_COLUMNS: dict[str, str] = {
     "countycode": "countyCode",
     "countyname": "countyName",
@@ -317,7 +352,7 @@ def read_hotels_csv(path: Path, *, nrows: int | None = None, encoding: str | Non
 
     Same underlying file can fail in one environment if only one encoding is hard-coded.
     """
-    read_kw: dict[str, Any] = {"low_memory": False}
+    read_kw: dict[str, Any] = {"low_memory": False, "skipinitialspace": True}
     if nrows is not None:
         read_kw["nrows"] = nrows
     if encoding is not None:
@@ -349,7 +384,7 @@ def run_cleaning_pipeline(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     hotels_raw = read_hotels_csv(hp, nrows=hotels_sample_rows, encoding=hotels_encoding)
-    world_raw = pd.read_csv(wp, encoding=world_encoding, low_memory=False)
+    world_raw = pd.read_csv(wp, encoding=world_encoding, low_memory=False, skipinitialspace=True)
 
     hotels_c = clean_hotels(hotels_raw)
     world_c = clean_world_cities(world_raw)
