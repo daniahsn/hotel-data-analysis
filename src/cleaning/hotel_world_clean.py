@@ -12,12 +12,93 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-import country_converter as coco
 import pandas as pd
 
+from src.features.hotel_text_features import (
+    attractions_count,
+    facilities_keyword_hits,
+    facilities_token_count,
+)
 from src.raw_data_paths import discover_raw_paths
+
+# ---------------------------------------------------------------------------
+# Hotel CSV header normalization (shared by ``read_hotels_csv`` usecols + ``standardize_hotel_columns``)
+# ---------------------------------------------------------------------------
+
+# Kaggle / local CSVs often differ by case, spaces, or spelling vs our first sample.
+_CANONICAL_HOTEL_COLUMNS: dict[str, str] = {
+    "countycode": "countyCode",
+    "countyname": "countyName",
+    "countryname": "countyName",
+    "country": "countyName",
+    "citycode": "cityCode",
+    "cityname": "cityName",
+    "hotelcode": "HotelCode",
+    "hotelname": "HotelName",
+    "hotelrating": "HotelRating",
+    "address": "Address",
+    "attractions": "Attractions",
+    "description": "Description",
+    "faxnumber": "FaxNumber",
+    "hotelfacilities": "HotelFacilities",
+    "map": "Map",
+    "phonenumber": "PhoneNumber",
+    "pincode": "PinCode",
+    "hotelwebsiteurl": "HotelWebsiteUrl",
+}
+
+# Columns required to run ``clean_hotels`` (everything else in wide exports can be dropped at read time).
+_HOTEL_COLUMNS_FOR_CLEANING: frozenset[str] = frozenset(
+    {
+        "countyCode",
+        "countyName",
+        "cityCode",
+        "cityName",
+        "HotelCode",
+        "HotelName",
+        "HotelRating",
+        "Map",
+        "Attractions",
+        "HotelFacilities",
+    }
+)
+
+
+def _strip_hotel_column_name(name: str) -> str:
+    """
+    Strip whitespace and BOM markers so the same file parses the same on Kaggle vs local.
+
+    UTF-8 BOM read as latin-1 becomes the three characters ``\\xef\\xbb\\xbf`` prefixing
+    the first header; that breaks lookups for ``countyCode`` even when the dataset is identical.
+    """
+    s = str(name).strip()
+    while s.startswith("\ufeff"):
+        s = s[1:].lstrip()
+    if s.startswith("\xef\xbb\xbf"):
+        s = s[3:].lstrip()
+    return s.strip()
+
+
+def _normalize_hotel_header_key(name: str) -> str:
+    return _strip_hotel_column_name(name).lower().replace(" ", "").replace("_", "")
+
+
+def _hotel_csv_usecols_keep(col: object) -> bool:
+    k = _normalize_hotel_header_key(str(col))
+    tgt = _CANONICAL_HOTEL_COLUMNS.get(k)
+    return tgt is not None and tgt in _HOTEL_COLUMNS_FOR_CLEANING
+
+
+def _world_csv_usecols_keep(col: object) -> bool:
+    """Keep only gazetteer fields needed for ``clean_world_cities`` (drops Region, lat/lon, …)."""
+    k = _normalize_hotel_header_key(str(col))
+    return k in frozenset({"country", "city", "population"})
+
+
+if TYPE_CHECKING:
+    from country_converter import CountryConverter
 
 # ---------------------------------------------------------------------------
 # Step 1 — country → ISO2
@@ -25,7 +106,10 @@ from src.raw_data_paths import discover_raw_paths
 
 
 @functools.lru_cache(maxsize=1)
-def _country_converter() -> coco.CountryConverter:
+def _country_converter() -> CountryConverter:
+    """Lazy import: ``country_converter`` is heavy; avoid loading it for geo/rating-only code paths."""
+    import country_converter as coco
+
     return coco.CountryConverter()
 
 
@@ -146,30 +230,19 @@ _WORD_TO_STAR: dict[str, int] = {
 }
 
 
-def _parse_one_star(raw: object) -> int | None:
-    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-        return None
-    s = str(raw).strip()
-    if not s or s.lower() == "nan":
-        return None
-    key = re.sub(r"\s+", "", s).lower()
-    if key in _WORD_TO_STAR:
-        return _WORD_TO_STAR[key]
-    m = re.search(r"(\d)\s*star", s, flags=re.IGNORECASE)
-    if m:
-        n = int(m.group(1))
-        if 1 <= n <= 5:
-            return n
-    return None
-
-
 def hotel_star_rating_numeric(rating: pd.Series) -> pd.Series:
     """``FourStar`` / ``3 Star`` → 1–5; unrecognized → NA."""
-    out: list[Any] = []
-    for raw in rating.tolist():
-        val = _parse_one_star(raw)
-        out.append(val if val is not None else pd.NA)
-    return pd.Series(out, index=rating.index, dtype="Int64")
+    mask_na = rating.isna()
+    s = rating.astype(str).str.strip()
+    invalid = s.str.lower().isin(("", "nan"))
+    squish = s.str.replace(r"\s+", "", regex=True).str.lower()
+    mapped = squish.map(_WORD_TO_STAR)
+    ext = s.str.extract(r"(\d)\s*star", expand=False, flags=re.I)
+    num = pd.to_numeric(ext, errors="coerce")
+    from_regex = num.where(num.between(1, 5), pd.NA)
+    combined = mapped.where(mapped.notna(), from_regex)
+    combined = combined.where(~(mask_na | invalid), pd.NA)
+    return combined.astype("Int64")
 
 
 # ---------------------------------------------------------------------------
@@ -199,71 +272,16 @@ def parse_hotel_map_lat_lon(map_series: pd.Series) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Step 6 — attractions text → count
-# ---------------------------------------------------------------------------
-
-
-def attractions_count(series: pd.Series) -> pd.Series:
-    """Comma-separated entries; empty / missing → 0; one blob without commas → 1."""
-    s = series.fillna("").astype(str).str.strip()
-    empty = s.eq("") | s.str.lower().eq("nan")
-    parts = s.str.split(",")
-    counts = parts.apply(lambda xs: sum(1 for x in xs if str(x).strip() != ""))
-    return counts.where(~empty, 0).astype("Int64")
-
-
-# ---------------------------------------------------------------------------
 # Full-table helpers
 # ---------------------------------------------------------------------------
-
-# Kaggle / local CSVs often differ by case, spaces, or spelling vs our first sample.
-_CANONICAL_HOTEL_COLUMNS: dict[str, str] = {
-    "countycode": "countyCode",
-    "countyname": "countyName",
-    "countryname": "countyName",
-    "country": "countyName",
-    "citycode": "cityCode",
-    "cityname": "cityName",
-    "hotelcode": "HotelCode",
-    "hotelname": "HotelName",
-    "hotelrating": "HotelRating",
-    "address": "Address",
-    "attractions": "Attractions",
-    "description": "Description",
-    "faxnumber": "FaxNumber",
-    "hotelfacilities": "HotelFacilities",
-    "map": "Map",
-    "phonenumber": "PhoneNumber",
-    "pincode": "PinCode",
-    "hotelwebsiteurl": "HotelWebsiteUrl",
-}
-
-
-def _normalize_hotel_header_key(name: str) -> str:
-    return _strip_hotel_column_name(name).lower().replace(" ", "").replace("_", "")
-
-
-def _strip_hotel_column_name(name: str) -> str:
-    """
-    Strip whitespace and BOM markers so the same file parses the same on Kaggle vs local.
-
-    UTF-8 BOM read as latin-1 becomes the three characters ``\\xef\\xbb\\xbf`` prefixing
-    the first header; that breaks lookups for ``countyCode`` even when the dataset is identical.
-    """
-    s = str(name).strip()
-    while s.startswith("\ufeff"):
-        s = s[1:].lstrip()
-    if s.startswith("\xef\xbb\xbf"):
-        s = s[3:].lstrip()
-    return s.strip()
 
 
 def standardize_hotel_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Strip headers, map aliases to the names used in ``clean_hotels`` (TBO / Kaggle variants).
 
-    ``countyName`` and ``Attractions`` are optional; if absent they are added as NA so
-    country codes and attraction counts still run.
+    ``countyName``, ``Attractions``, and ``HotelFacilities`` are optional; if absent they are
+    added as NA so downstream features still run.
     """
     h = df.copy()
     h.columns = [_strip_hotel_column_name(c) for c in h.columns]
@@ -281,6 +299,11 @@ def standardize_hotel_columns(df: pd.DataFrame) -> pd.DataFrame:
         h["countyName"] = pd.NA
     if "Attractions" not in h.columns:
         h["Attractions"] = pd.NA
+    if "HotelFacilities" not in h.columns:
+        h["HotelFacilities"] = pd.NA
+    for opt in ("cityCode", "HotelCode", "HotelName"):
+        if opt not in h.columns:
+            h[opt] = pd.NA
     required = ("countyCode", "cityName", "HotelRating", "Map")
     missing = [c for c in required if c not in h.columns]
     if missing:
@@ -294,7 +317,8 @@ def standardize_hotel_columns(df: pd.DataFrame) -> pd.DataFrame:
 def clean_hotels(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add: ``country_iso2``, ``city_join_key``, ``hotel_star_rating``,
-    ``hotel_latitude``, ``hotel_longitude``, ``attractions_count``.
+    ``hotel_latitude``, ``hotel_longitude``, ``attractions_count``,
+    ``facilities_token_count``, ``facilities_keyword_hits`` (from ``src.features``).
     """
     out = standardize_hotel_columns(df)
     out["country_iso2"] = iso2_for_hotels(out["countyCode"], out["countyName"])
@@ -304,6 +328,8 @@ def clean_hotels(df: pd.DataFrame) -> pd.DataFrame:
     out["hotel_latitude"] = geo["hotel_latitude"]
     out["hotel_longitude"] = geo["hotel_longitude"]
     out["attractions_count"] = attractions_count(out["Attractions"])
+    out["facilities_token_count"] = facilities_token_count(out["HotelFacilities"])
+    out["facilities_keyword_hits"] = facilities_keyword_hits(out["HotelFacilities"])
     return out
 
 
@@ -323,38 +349,90 @@ def clean_world_cities(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def join_hotels_world_cities(hotels_clean: pd.DataFrame, world_clean: pd.DataFrame) -> pd.DataFrame:
-    """Left join on ``country_iso2`` + ``city_join_key``; adds city_region / population / gazetteer lat-lon."""
-    right = world_clean.rename(
-        columns={
-            "Region": "city_region",
-            "Population": "city_population",
-            "Latitude": "city_gazetteer_latitude",
-            "Longitude": "city_gazetteer_longitude",
-        }
-    )
+    """Left join on ``country_iso2`` + ``city_join_key``; attach ``city_population`` only."""
+    left = hotels_clean.copy()
+    right = world_clean.rename(columns={"Population": "city_population"})
     keys = ["country_iso2", "city_join_key"]
-    use = keys + [
-        "city_region",
-        "city_population",
-        "city_gazetteer_latitude",
-        "city_gazetteer_longitude",
-    ]
-    use = [c for c in use if c in right.columns]
-    return hotels_clean.merge(right[use], on=keys, how="left")
+    use = [c for c in keys + ["city_population"] if c in right.columns]
+    right_sub = right[use].copy()
+    for k in keys:
+        left[k] = left[k].astype("category")
+        right_sub[k] = right_sub[k].astype("category")
+    return left.merge(right_sub, on=keys, how="left")
+
+
+# Columns written to ``hotels_with_cities`` (model-ready join). ``facilities_token_count`` → ``facilities_count``.
+_FINAL_JOIN_SOURCE_COLS: tuple[str, ...] = (
+    "countyCode",
+    "countyName",
+    "cityCode",
+    "cityName",
+    "HotelCode",
+    "HotelName",
+    "hotel_star_rating",
+    "attractions_count",
+    "facilities_token_count",
+    "facilities_keyword_hits",
+    "hotel_latitude",
+    "hotel_longitude",
+    "city_population",
+)
+
+_FINAL_JOIN_OUTPUT_COLS: tuple[str, ...] = (
+    "countyCode",
+    "countyName",
+    "cityCode",
+    "cityName",
+    "HotelCode",
+    "HotelName",
+    "hotel_star_rating",
+    "attractions_count",
+    "facilities_count",
+    "facilities_keyword_hits",
+    "hotel_latitude",
+    "hotel_longitude",
+    "city_population",
+)
+
+
+def finalize_joined_hotels(joined: pd.DataFrame) -> pd.DataFrame:
+    """
+    Keep only the fields used for modeling from a ``join_hotels_world_cities`` frame.
+
+    Drops join keys, raw text columns, gazetteer extras, etc. Renames
+    ``facilities_token_count`` → ``facilities_count``; keeps ``facilities_keyword_hits``.
+    """
+    missing = [c for c in _FINAL_JOIN_SOURCE_COLS if c not in joined.columns]
+    if missing:
+        raise KeyError(
+            f"finalize_joined_hotels: missing {missing}. Columns present: {list(joined.columns)}"
+        )
+    out = joined.loc[:, list(_FINAL_JOIN_SOURCE_COLS)].copy()
+    out = out.rename(columns={"facilities_token_count": "facilities_count"})
+    return out.reindex(columns=list(_FINAL_JOIN_OUTPUT_COLS))
 
 
 HOTELS_WORLD_KEYS: tuple[str, ...] = ("hotels", "world")
 
 
-def read_hotels_csv(path: Path, *, nrows: int | None = None, encoding: str | None = None) -> pd.DataFrame:
+def read_hotels_csv(
+    path: Path,
+    *,
+    nrows: int | None = None,
+    encoding: str | None = None,
+    columns: Literal["cleaning", "all"] = "cleaning",
+) -> pd.DataFrame:
     """
     Read hotels CSV. If ``encoding`` is None, try ``utf-8-sig`` then ``latin-1`` (common Kaggle vs local).
 
+    ``columns="cleaning"`` skips wide text columns (e.g. ``Description``) not needed for ``clean_hotels``.
     Same underlying file can fail in one environment if only one encoding is hard-coded.
     """
     read_kw: dict[str, Any] = {"low_memory": False, "skipinitialspace": True}
     if nrows is not None:
         read_kw["nrows"] = nrows
+    if columns == "cleaning":
+        read_kw["usecols"] = _hotel_csv_usecols_keep
     if encoding is not None:
         return pd.read_csv(path, encoding=encoding, **read_kw)
     for enc in ("utf-8-sig", "latin-1"):
@@ -363,6 +441,22 @@ def read_hotels_csv(path: Path, *, nrows: int | None = None, encoding: str | Non
         except UnicodeDecodeError:
             continue
     return pd.read_csv(path, encoding="latin-1", **read_kw)
+
+
+def read_world_cities_csv(
+    path: Path,
+    *,
+    nrows: int | None = None,
+    encoding: str = "utf-8",
+    columns: Literal["cleaning", "all"] = "cleaning",
+) -> pd.DataFrame:
+    """Read world-cities CSV; ``columns='cleaning'`` keeps Country / City / Population only."""
+    read_kw: dict[str, Any] = {"low_memory": False, "skipinitialspace": True}
+    if nrows is not None:
+        read_kw["nrows"] = nrows
+    if columns == "cleaning":
+        read_kw["usecols"] = _world_csv_usecols_keep
+    return pd.read_csv(path, encoding=encoding, **read_kw)
 
 
 def run_cleaning_pipeline(
@@ -384,7 +478,7 @@ def run_cleaning_pipeline(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     hotels_raw = read_hotels_csv(hp, nrows=hotels_sample_rows, encoding=hotels_encoding)
-    world_raw = pd.read_csv(wp, encoding=world_encoding, low_memory=False, skipinitialspace=True)
+    world_raw = read_world_cities_csv(wp, encoding=world_encoding)
 
     hotels_c = clean_hotels(hotels_raw)
     world_c = clean_world_cities(world_raw)
@@ -402,5 +496,6 @@ def run_cleaning_pipeline(
     written["hotels_clean"] = _write("hotels_clean", hotels_c)
     written["world_cities_clean"] = _write("world_cities_clean", world_c)
     if also_join:
-        written["hotels_with_cities"] = _write("hotels_with_cities", join_hotels_world_cities(hotels_c, world_c))
+        merged = join_hotels_world_cities(hotels_c, world_c)
+        written["hotels_with_cities"] = _write("hotels_with_cities", finalize_joined_hotels(merged))
     return written
