@@ -181,13 +181,87 @@ def attractions_count(series: pd.Series) -> pd.Series:
 # Full-table helpers
 # ---------------------------------------------------------------------------
 
+# Kaggle / vendor CSVs often differ by case, spaces, or spelling vs our first sample.
+_CANONICAL_HOTEL_COLUMNS: dict[str, str] = {
+    "countycode": "countyCode",
+    "countyname": "countyName",
+    "countryname": "countyName",
+    "country": "countyName",
+    "citycode": "cityCode",
+    "cityname": "cityName",
+    "hotelcode": "HotelCode",
+    "hotelname": "HotelName",
+    "hotelrating": "HotelRating",
+    "address": "Address",
+    "attractions": "Attractions",
+    "description": "Description",
+    "faxnumber": "FaxNumber",
+    "hotelfacilities": "HotelFacilities",
+    "map": "Map",
+    "phonenumber": "PhoneNumber",
+    "pincode": "PinCode",
+    "hotelwebsiteurl": "HotelWebsiteUrl",
+}
+
+
+def _normalize_hotel_header_key(name: str) -> str:
+    return _strip_hotel_column_name(name).lower().replace(" ", "").replace("_", "")
+
+
+def _strip_hotel_column_name(name: str) -> str:
+    """
+    Strip whitespace and BOM markers so the same file parses the same on Kaggle vs local.
+
+    UTF-8 BOM read as latin-1 becomes the three characters ``\\xef\\xbb\\xbf`` prefixing
+    the first header; that breaks lookups for ``countyCode`` even when the dataset is identical.
+    """
+    s = str(name).strip()
+    while s.startswith("\ufeff"):
+        s = s[1:].lstrip()
+    if s.startswith("\xef\xbb\xbf"):
+        s = s[3:].lstrip()
+    return s.strip()
+
+
+def standardize_hotel_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Strip headers, map aliases to the names used in ``clean_hotels`` (TBO / Kaggle variants).
+
+    ``countyName`` and ``Attractions`` are optional; if absent they are added as NA so
+    country codes and attraction counts still run.
+    """
+    h = df.copy()
+    h.columns = [_strip_hotel_column_name(c) for c in h.columns]
+    renames = {}
+    for c in h.columns:
+        k = _normalize_hotel_header_key(c)
+        if k in _CANONICAL_HOTEL_COLUMNS:
+            tgt = _CANONICAL_HOTEL_COLUMNS[k]
+            if c != tgt:
+                renames[c] = tgt
+    h = h.rename(columns=renames)
+    if h.columns.duplicated().any():
+        h = h.loc[:, ~h.columns.duplicated(keep="first")].copy()
+    if "countyName" not in h.columns:
+        h["countyName"] = pd.NA
+    if "Attractions" not in h.columns:
+        h["Attractions"] = pd.NA
+    required = ("countyCode", "cityName", "HotelRating", "Map")
+    missing = [c for c in required if c not in h.columns]
+    if missing:
+        raise KeyError(
+            f"Hotels CSV missing columns {missing} after header normalization. "
+            f"Columns present: {list(h.columns)}"
+        )
+    return h
+
 
 def clean_hotels(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add: ``country_iso2``, ``city_join_key``, ``hotel_star_rating``,
     ``hotel_latitude``, ``hotel_longitude``, ``attractions_count``.
     """
-    out = df.copy()
+    out = standardize_hotel_columns(df)
     out["country_iso2"] = iso2_for_hotels(out["countyCode"], out["countyName"])
     out["city_join_key"] = city_join_key(out["cityName"])
     out["hotel_star_rating"] = hotel_star_rating_numeric(out["HotelRating"])
@@ -237,6 +311,25 @@ def join_hotels_world_cities(hotels_clean: pd.DataFrame, world_clean: pd.DataFra
 HOTELS_WORLD_KEYS: tuple[str, ...] = ("hotels", "world")
 
 
+def read_hotels_csv(path: Path, *, nrows: int | None = None, encoding: str | None = None) -> pd.DataFrame:
+    """
+    Read hotels CSV. If ``encoding`` is None, try ``utf-8-sig`` then ``latin-1`` (common Kaggle vs local).
+
+    Same underlying file can fail in one environment if only one encoding is hard-coded.
+    """
+    read_kw: dict[str, Any] = {"low_memory": False}
+    if nrows is not None:
+        read_kw["nrows"] = nrows
+    if encoding is not None:
+        return pd.read_csv(path, encoding=encoding, **read_kw)
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            return pd.read_csv(path, encoding=enc, **read_kw)
+        except UnicodeDecodeError:
+            continue
+    return pd.read_csv(path, encoding="latin-1", **read_kw)
+
+
 def run_cleaning_pipeline(
     *,
     hotels_path: Path | None = None,
@@ -245,7 +338,7 @@ def run_cleaning_pipeline(
     hotels_sample_rows: int | None = None,
     also_join: bool = True,
     output_format: Literal["parquet", "csv"] = "parquet",
-    hotels_encoding: str = "latin-1",
+    hotels_encoding: str | None = None,
     world_encoding: str = "utf-8",
 ) -> dict[str, Path]:
     """Load raw CSVs, run ``clean_hotels`` / ``clean_world_cities``, optional join, write outputs."""
@@ -255,11 +348,7 @@ def run_cleaning_pipeline(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    read_kw: dict[str, Any] = {"low_memory": False}
-    if hotels_sample_rows is not None:
-        read_kw["nrows"] = hotels_sample_rows
-
-    hotels_raw = pd.read_csv(hp, encoding=hotels_encoding, **read_kw)
+    hotels_raw = read_hotels_csv(hp, nrows=hotels_sample_rows, encoding=hotels_encoding)
     world_raw = pd.read_csv(wp, encoding=world_encoding, low_memory=False)
 
     hotels_c = clean_hotels(hotels_raw)

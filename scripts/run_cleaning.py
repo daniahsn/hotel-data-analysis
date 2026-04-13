@@ -36,6 +36,12 @@ def main() -> None:
         help="Output file format (default: parquet)",
     )
     p.add_argument("--no-join", action="store_true", help="Skip hotels ↔ cities join table")
+    p.add_argument(
+        "--hotels-encoding",
+        default=None,
+        metavar="ENC",
+        help="Force hotels CSV encoding (default: try utf-8-sig then latin-1)",
+    )
     args = p.parse_args()
 
     written = run_cleaning_pipeline(
@@ -43,6 +49,7 @@ def main() -> None:
         hotels_sample_rows=args.sample,
         also_join=not args.no_join,
         output_format=args.format,
+        hotels_encoding=args.hotels_encoding,
     )
     for label, path in written.items():
         print(f"{label}: {path}")

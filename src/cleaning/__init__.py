@@ -11,7 +11,9 @@ from src.cleaning.hotel_world_clean import (
     iso2_from_country_names,
     join_hotels_world_cities,
     parse_hotel_map_lat_lon,
+    read_hotels_csv,
     run_cleaning_pipeline,
+    standardize_hotel_columns,
 )
 
 __all__ = [
@@ -25,5 +27,7 @@ __all__ = [
     "iso2_from_country_names",
     "join_hotels_world_cities",
     "parse_hotel_map_lat_lon",
+    "read_hotels_csv",
     "run_cleaning_pipeline",
+    "standardize_hotel_columns",
 ]
