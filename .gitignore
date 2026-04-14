@@ -2,3 +2,7 @@
 .pytest_cache/
 __pycache__/
 .venv/
+
+# Processed outputs (keep directory with .gitkeep)
+data/processed/*
+!data/processed/.gitkeep
