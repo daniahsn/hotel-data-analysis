@@ -120,16 +120,20 @@ def build_modeling_feature_matrices(
         stratify=strat,
     )
 
+    # Categoricals must be plain strings for sklearn encoders.
+    # Pandas StringDtype uses pd.NA, which breaks sklearn's uniqueness checks.
+    _CAT_MISSING = "__MISSING__"
+
     # Cast city id to string so OHE treats codes as categories, not magnitudes.
     X_train = X_train.copy()
     X_test = X_test.copy()
     if "cityCode" in X_train.columns:
-        X_train["cityCode"] = X_train["cityCode"].astype("string")
-        X_test["cityCode"] = X_test["cityCode"].astype("string")
+        X_train["cityCode"] = X_train["cityCode"].fillna(_CAT_MISSING).astype(str)
+        X_test["cityCode"] = X_test["cityCode"].fillna(_CAT_MISSING).astype(str)
     for c in ("countyCode", "cityName"):
         if c in X_train.columns:
-            X_train[c] = X_train[c].astype("string")
-            X_test[c] = X_test[c].astype("string")
+            X_train[c] = X_train[c].fillna(_CAT_MISSING).astype(str)
+            X_test[c] = X_test[c].fillna(_CAT_MISSING).astype(str)
 
     numeric_transformer = Pipeline(
         steps=[
