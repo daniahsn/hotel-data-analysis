@@ -1,1 +1,1 @@
-"""Project code: path discovery and analysis helpers."""
+"""Project code: path helpers, column naming (``name_mappings``), cleaning, features, modeling."""

@@ -22,49 +22,14 @@ from src.features.hotel_text_features import (
     facilities_keyword_hits,
     facilities_token_count,
 )
-from src.raw_data_paths import discover_raw_paths
-
-# ---------------------------------------------------------------------------
-# Hotel CSV header normalization (shared by ``read_hotels_csv`` usecols + ``standardize_hotel_columns``)
-# ---------------------------------------------------------------------------
-
-# Kaggle / local CSVs often differ by case, spaces, or spelling vs our first sample.
-_CANONICAL_HOTEL_COLUMNS: dict[str, str] = {
-    "countycode": "countyCode",
-    "countyname": "countyName",
-    "countryname": "countyName",
-    "country": "countyName",
-    "citycode": "cityCode",
-    "cityname": "cityName",
-    "hotelcode": "HotelCode",
-    "hotelname": "HotelName",
-    "hotelrating": "HotelRating",
-    "address": "Address",
-    "attractions": "Attractions",
-    "description": "Description",
-    "faxnumber": "FaxNumber",
-    "hotelfacilities": "HotelFacilities",
-    "map": "Map",
-    "phonenumber": "PhoneNumber",
-    "pincode": "PinCode",
-    "hotelwebsiteurl": "HotelWebsiteUrl",
-}
-
-# Columns required to run ``clean_hotels`` (everything else in wide exports can be dropped at read time).
-_HOTEL_COLUMNS_FOR_CLEANING: frozenset[str] = frozenset(
-    {
-        "countyCode",
-        "countyName",
-        "cityCode",
-        "cityName",
-        "HotelCode",
-        "HotelName",
-        "HotelRating",
-        "Map",
-        "Attractions",
-        "HotelFacilities",
-    }
+from src.name_mappings import (
+    HOTEL_COLUMNS_FOR_CLEANING,
+    HOTEL_HEADER_TO_CANONICAL,
+    JOINED_HOTELS_FILE_STEM,
+    JOINED_TABLE_REQUIRED_COLUMNS,
+    WORLD_CSV_HEADER_KEYS,
 )
+from src.raw_data_paths import discover_raw_paths
 
 
 def _strip_hotel_column_name(name: str) -> str:
@@ -88,14 +53,14 @@ def _normalize_hotel_header_key(name: str) -> str:
 
 def _hotel_csv_usecols_keep(col: object) -> bool:
     k = _normalize_hotel_header_key(str(col))
-    tgt = _CANONICAL_HOTEL_COLUMNS.get(k)
-    return tgt is not None and tgt in _HOTEL_COLUMNS_FOR_CLEANING
+    tgt = HOTEL_HEADER_TO_CANONICAL.get(k)
+    return tgt is not None and tgt in HOTEL_COLUMNS_FOR_CLEANING
 
 
 def _world_csv_usecols_keep(col: object) -> bool:
     """Keep only gazetteer fields needed for ``clean_world_cities`` (drops Region, lat/lon, …)."""
     k = _normalize_hotel_header_key(str(col))
-    return k in frozenset({"country", "city", "population"})
+    return k in WORLD_CSV_HEADER_KEYS
 
 
 if TYPE_CHECKING:
@@ -289,8 +254,8 @@ def standardize_hotel_columns(df: pd.DataFrame) -> pd.DataFrame:
     renames = {}
     for c in h.columns:
         k = _normalize_hotel_header_key(c)
-        if k in _CANONICAL_HOTEL_COLUMNS:
-            tgt = _CANONICAL_HOTEL_COLUMNS[k]
+        if k in HOTEL_HEADER_TO_CANONICAL:
+            tgt = HOTEL_HEADER_TO_CANONICAL[k]
             if c != tgt:
                 renames[c] = tgt
     h = h.rename(columns=renames)
@@ -362,7 +327,7 @@ def join_hotels_world_cities(hotels_clean: pd.DataFrame, world_clean: pd.DataFra
     return left.merge(right_sub, on=keys, how="left")
 
 
-# Columns written to ``hotels_with_cities`` (model-ready join). ``facilities_token_count`` → ``facilities_count``.
+# Columns written to the joined output (stem ``JOINED_HOTELS_FILE_STEM``). ``facilities_token_count`` → ``facilities_count``.
 _FINAL_JOIN_SOURCE_COLS: tuple[str, ...] = (
     "countyCode",
     "countyName",
@@ -379,23 +344,6 @@ _FINAL_JOIN_SOURCE_COLS: tuple[str, ...] = (
     "city_population",
 )
 
-_FINAL_JOIN_OUTPUT_COLS: tuple[str, ...] = (
-    "countyCode",
-    "countyName",
-    "cityCode",
-    "cityName",
-    "HotelCode",
-    "HotelName",
-    "hotel_star_rating",
-    "attractions_count",
-    "facilities_count",
-    "facilities_keyword_hits",
-    "hotel_latitude",
-    "hotel_longitude",
-    "city_population",
-)
-
-
 def finalize_joined_hotels(joined: pd.DataFrame) -> pd.DataFrame:
     """
     Keep only the fields used for modeling from a ``join_hotels_world_cities`` frame.
@@ -410,7 +358,7 @@ def finalize_joined_hotels(joined: pd.DataFrame) -> pd.DataFrame:
         )
     out = joined.loc[:, list(_FINAL_JOIN_SOURCE_COLS)].copy()
     out = out.rename(columns={"facilities_token_count": "facilities_count"})
-    return out.reindex(columns=list(_FINAL_JOIN_OUTPUT_COLS))
+    return out.reindex(columns=list(JOINED_TABLE_REQUIRED_COLUMNS))
 
 
 HOTELS_WORLD_KEYS: tuple[str, ...] = ("hotels", "world")
@@ -536,5 +484,5 @@ def run_cleaning_pipeline(
     written["world_cities_clean"] = _write("world_cities_clean", world_c)
     if also_join:
         merged = join_hotels_world_cities(hotels_c, world_c)
-        written["hotels_with_cities"] = _write("hotels_with_cities", finalize_joined_hotels(merged))
+        written[JOINED_HOTELS_FILE_STEM] = _write(JOINED_HOTELS_FILE_STEM, finalize_joined_hotels(merged))
     return written

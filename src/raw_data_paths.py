@@ -1,11 +1,15 @@
-"""Resolve raw CSV paths: Kaggle `/kaggle/input` first, else local `data/raw/`."""
+"""Locate raw CSVs and the joined modeling Parquet (Kaggle + local)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from src.name_mappings import JOINED_HOTELS_FILE_STEM
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KAGGLE_INPUT = Path("/kaggle/input")
+
+JOINED_HOTELS_PARQUET_GLOB = f"{JOINED_HOTELS_FILE_STEM}*.parquet"
 
 # Order used when iterating all three datasets (e.g. head script).
 DATASET_ORDER: tuple[str, ...] = ("hotels", "world", "crime")
@@ -27,6 +31,56 @@ LOCAL_NAMES: dict[str, tuple[str, ...]] = {
 
 def is_kaggle_runtime() -> bool:
     return KAGGLE_INPUT.is_dir()
+
+
+def resolve_joined_hotels_parquet(project_root: Path | None = None) -> Path:
+    """
+    Path to the **joined hotels + world-cities** table used for modeling.
+
+    Use this single helper on **Kaggle** and **locally** instead of hard-coding paths.
+
+    - **Kaggle:** searches each dataset under ``/kaggle/input`` for
+      ``hotels_with_cities*.parquet`` (prefers exact ``hotels_with_cities.parquet``).
+    - **Local:** ``{project_root}/data/processed/`` with the same glob (default
+      ``project_root`` = repository root).
+
+    Name the processed file on disk or in your Kaggle Dataset using the stem
+    ``hotels_with_cities`` (e.g. ``hotels_with_cities.parquet``).
+    """
+    if is_kaggle_runtime():
+        candidates: list[Path] = []
+        for top in sorted(KAGGLE_INPUT.iterdir()):
+            if not top.is_dir():
+                continue
+            for p in top.rglob(JOINED_HOTELS_PARQUET_GLOB):
+                if p.is_file():
+                    candidates.append(p)
+        if not candidates:
+            tops = [p.name for p in KAGGLE_INPUT.iterdir()] if KAGGLE_INPUT.is_dir() else []
+            raise FileNotFoundError(
+                f"No {JOINED_HOTELS_PARQUET_GLOB} under {KAGGLE_INPUT}. "
+                f"Add your processed joined dataset via **Add data**. Top-level inputs: {tops}"
+            )
+
+        def _sort_key(path: Path) -> tuple[int, str]:
+            if path.name == f"{JOINED_HOTELS_FILE_STEM}.parquet":
+                return (0, path.name)
+            return (1, path.name)
+
+        return sorted(candidates, key=_sort_key)[0]
+
+    root = project_root or PROJECT_ROOT
+    processed = root / "data" / "processed"
+    direct = processed / f"{JOINED_HOTELS_FILE_STEM}.parquet"
+    if direct.is_file():
+        return direct
+    matches = sorted(processed.glob(JOINED_HOTELS_PARQUET_GLOB))
+    if not matches:
+        raise FileNotFoundError(
+            f"No {JOINED_HOTELS_PARQUET_GLOB} under {processed}. "
+            f"Run ``scripts/pipeline/run_cleaning.py`` or place the joined Parquet there."
+        )
+    return matches[0]
 
 
 def _find_csv_under(root: Path, names: tuple[str, ...]) -> Path | None:
@@ -98,3 +152,8 @@ def discover_raw_paths(
             + "\nAttach the same Kaggle datasets in a notebook, or place the CSVs in data/raw/."
         )
     return out
+
+
+# Aliases for clearer imports in notebooks (same behavior as the functions above).
+joined_hotels_parquet_path = resolve_joined_hotels_parquet
+raw_csv_paths = discover_raw_paths

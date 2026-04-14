@@ -1,8 +1,11 @@
 """
 Build the final numeric matrix for modeling from ``hotels_with_cities`` Parquet.
 
+Joined Parquet path: :func:`src.raw_data_paths.resolve_joined_hotels_parquet` (Kaggle + local).
+Column renames / aliases: :mod:`src.name_mappings`.
+
 - Engineered counts: ``attractions_count``, ``facilities_count``, ``facilities_keyword_hits``
-  (aliases from exports are normalized).
+  (aliases from exports are normalized via :mod:`src.name_mappings`).
 - Categoricals: country / city / locality (``countyCode``, ``cityCode``, ``cityName``) via
   one-hot with frequency caps (infrequent → pooled).
 - Numeric: ``city_population``, ``hotel_latitude``, ``hotel_longitude`` + the three counts,
@@ -23,35 +26,16 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-# Columns produced by ``finalize_joined_hotels`` / cleaning pipeline.
-JOINED_REQUIRED: tuple[str, ...] = (
-    "countyCode",
-    "countyName",
-    "cityCode",
-    "cityName",
-    "HotelCode",
-    "HotelName",
-    "hotel_star_rating",
-    "attractions_count",
-    "facilities_count",
-    "facilities_keyword_hits",
-    "hotel_latitude",
-    "hotel_longitude",
-    "city_population",
-)
+from src.name_mappings import JOINED_PARQUET_COLUMN_ALIASES, JOINED_TABLE_REQUIRED_COLUMNS
 
-# Aliases seen in notebooks / manual exports.
-_COLUMN_ALIASES: dict[str, str] = {
-    "facilities_keywords_count": "facilities_keyword_hits",
-    "feature_count": "facilities_count",
-    "Feature_keywords": "facilities_keyword_hits",
-}
+# Backward-compatible name for required joined-table columns.
+JOINED_REQUIRED: tuple[str, ...] = JOINED_TABLE_REQUIRED_COLUMNS
 
 
 def normalize_engineered_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename alias columns to the canonical names used in this repo."""
+    """Rename alias columns to the canonical names in :mod:`src.name_mappings`."""
     out = df.copy()
-    for bad, good in _COLUMN_ALIASES.items():
+    for bad, good in JOINED_PARQUET_COLUMN_ALIASES.items():
         if bad in out.columns and good not in out.columns:
             out = out.rename(columns={bad: good})
     return out
@@ -64,7 +48,7 @@ def load_joined_hotels(path: Path | str) -> pd.DataFrame:
         raise FileNotFoundError(p)
     df = pd.read_parquet(p)
     df = normalize_engineered_column_names(df)
-    missing = [c for c in JOINED_REQUIRED if c not in df.columns]
+    missing = [c for c in JOINED_TABLE_REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"Joined table missing columns {missing}. Present: {list(df.columns)}")
     return df
@@ -96,7 +80,6 @@ def build_modeling_feature_matrices(
 
     - **country**: ``countyCode``
     - **city**: ``cityCode`` (cast to string for hashing stability)
-    - **region / locality** (no separate ``Region`` in join): ``cityName`` buckets local labels
 
     Numeric (median impute + ``StandardScaler``):
 
@@ -213,12 +196,7 @@ def save_modeling_bundle(
 
 
 def default_joined_parquet(project_root: Path) -> Path:
-    """Prefer ``hotels_with_cities.parquet``; else first ``hotels_with_cities*.parquet`` under ``data/processed``."""
-    processed = project_root / "data" / "processed"
-    direct = processed / "hotels_with_cities.parquet"
-    if direct.is_file():
-        return direct
-    matches = sorted(processed.glob("hotels_with_cities*.parquet"))
-    if not matches:
-        raise FileNotFoundError(f"No hotels_with_cities*.parquet under {processed}")
-    return matches[0]
+    """Alias for :func:`src.raw_data_paths.resolve_joined_hotels_parquet`."""
+    from src.raw_data_paths import resolve_joined_hotels_parquet
+
+    return resolve_joined_hotels_parquet(project_root)

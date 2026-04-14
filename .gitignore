@@ -2,7 +2,11 @@
 .pytest_cache/
 __pycache__/
 .venv/
+.DS_Store
 
 # Processed outputs (keep directory with .gitkeep)
 data/processed/*
 !data/processed/.gitkeep
+
+# Local training artifacts
+outputs/

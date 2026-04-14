@@ -3,7 +3,7 @@
 Fast smoke checks (no pytest): helpers, cleaning pipeline on tiny CSVs, feature matrix.
 
 Run from repo root:
-  python scripts/smoke_checks.py
+  python scripts/pipeline/smoke_checks.py
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
@@ -26,6 +26,7 @@ from src.cleaning.hotel_world_clean import (
     parse_hotel_map_lat_lon,
     run_cleaning_pipeline,
 )
+from src.name_mappings import JOINED_HOTELS_FILE_STEM
 from src.features.hotel_text_features import attractions_count, facilities_token_count
 from src.modeling.feature_matrix import (
     build_modeling_feature_matrices,
@@ -76,8 +77,8 @@ def run_cleaning_pipeline_smoke(work: Path) -> None:
     )
     assert written["hotels_clean"].is_file()
     assert written["world_cities_clean"].is_file()
-    assert written["hotels_with_cities"].is_file()
-    merged = pd.read_csv(written["hotels_with_cities"])
+    assert written[JOINED_HOTELS_FILE_STEM].is_file()
+    merged = pd.read_csv(written[JOINED_HOTELS_FILE_STEM])
     assert merged["hotel_star_rating"].iloc[0] == 3
     assert "city_population" in merged.columns
 
