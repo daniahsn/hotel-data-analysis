@@ -8,6 +8,7 @@ Resolves the joined Parquet via :func:`src.raw_data_paths.resolve_joined_hotels_
 Examples::
 
   python scripts/modeling/train_baseline_model.py --sample 100000 --model rf
+  python scripts/modeling/train_baseline_model.py --sample 100000 --model xgb
   python scripts/modeling/train_baseline_model.py --joined-path /path/to/hotels_with_cities.parquet --model linear
 """
 
@@ -21,7 +22,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import mean_squared_error, r2_score
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -56,15 +57,21 @@ def main() -> int:
     p.add_argument("--sample", type=int, default=None, metavar="N", help="Use random N rows after dropping NA target")
     p.add_argument(
         "--model",
-        choices=("linear", "rf"),
+        choices=("linear", "ridge", "rf", "xgb"),
         default="rf",
-        help="linear = LinearRegression; rf = RandomForestRegressor",
+        help="linear = LinearRegression; ridge = Ridge regression; rf = RandomForestRegressor; xgb = XGBoost regressor",
     )
     p.add_argument("--test-size", type=float, default=0.2)
     p.add_argument("--random-state", type=int, default=42)
     p.add_argument("--out-dir", type=Path, default=None, help="Where to save model + metrics JSON")
     p.add_argument("--rf-estimators", type=int, default=100)
     p.add_argument("--rf-max-depth", type=int, default=20)
+    p.add_argument("--ridge-alpha", type=float, default=1.0, help="Regularization strength for Ridge")
+    p.add_argument("--xgb-estimators", type=int, default=300)
+    p.add_argument("--xgb-max-depth", type=int, default=8)
+    p.add_argument("--xgb-learning-rate", type=float, default=0.05)
+    p.add_argument("--xgb-subsample", type=float, default=0.8)
+    p.add_argument("--xgb-colsample-bytree", type=float, default=0.8)
     args = p.parse_args()
 
     joined = args.joined_path or resolve_joined_hotels_parquet(args.project_root)
@@ -89,6 +96,25 @@ def main() -> int:
 
     if args.model == "linear":
         model = LinearRegression()
+    elif args.model == "ridge":
+        model = Ridge(alpha=args.ridge_alpha, random_state=args.random_state)
+    elif args.model == "xgb":
+        try:
+            from xgboost import XGBRegressor
+        except ImportError as e:
+            raise SystemExit(
+                "xgboost is required for --model xgb. Install it with: python -m pip install xgboost"
+            ) from e
+        model = XGBRegressor(
+            n_estimators=args.xgb_estimators,
+            max_depth=args.xgb_max_depth,
+            learning_rate=args.xgb_learning_rate,
+            subsample=args.xgb_subsample,
+            colsample_bytree=args.xgb_colsample_bytree,
+            objective="reg:squarederror",
+            n_jobs=-1,
+            random_state=args.random_state,
+        )
     else:
         model = RandomForestRegressor(
             n_estimators=args.rf_estimators,

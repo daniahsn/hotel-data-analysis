@@ -414,6 +414,7 @@ def run_cleaning_pipeline(
     world_path: Path | None = None,
     output_dir: Path,
     hotels_sample_rows: int | None = None,
+    world_sample_rows: int | None = None,
     hotels_chunksize: int | None = None,
     progress_every_rows: int | None = None,
     also_join: bool = True,
@@ -428,7 +429,7 @@ def run_cleaning_pipeline(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    world_raw = read_world_cities_csv(wp, encoding=world_encoding)
+    world_raw = read_world_cities_csv(wp, nrows=world_sample_rows, encoding=world_encoding)
     world_c = clean_world_cities(world_raw)
     if hotels_chunksize is not None and hotels_sample_rows is not None:
         raise ValueError("Use either hotels_chunksize or hotels_sample_rows (not both).")
