@@ -44,6 +44,13 @@ def main() -> None:
         help="Read only first N hotel rows (for local smoke tests)",
     )
     p.add_argument(
+        "--world-sample",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Read only first N world-cities rows (for local smoke tests)",
+    )
+    p.add_argument(
         "--format",
         choices=("parquet", "csv"),
         default="parquet",
@@ -61,6 +68,7 @@ def main() -> None:
     written = run_cleaning_pipeline(
         output_dir=args.output_dir,
         hotels_sample_rows=args.sample,
+        world_sample_rows=args.world_sample,
         hotels_chunksize=args.chunksize,
         progress_every_rows=args.progress_every,
         also_join=not args.no_join,

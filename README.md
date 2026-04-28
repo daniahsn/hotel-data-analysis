@@ -20,4 +20,7 @@ pip install -r requirements.txt
 python scripts/pipeline/smoke_checks.py
 python scripts/pipeline/run_cleaning.py --sample 5000
 python scripts/modeling/train_baseline_model.py --sample 100000 --model rf
+python scripts/modeling/train_baseline_model.py --sample 100000 --model ridge --tune
+python scripts/modeling/train_baseline_model.py --sample 100000 --model xgb --tune
+python scripts/modeling/permutation_hypothesis_tests.py --sample 100000 --n-permutations 500
 ```
